@@ -23,12 +23,12 @@
   "dependencies": {
     "@nordcraft/core": "workspace:*",
     "@nordcraft/ssr": "workspace:*",
-    "hono": "4.9.6"
+    "hono": "4.10.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20251008.0",
+    "@cloudflare/workers-types": "4.20251014.0",
     "@nordcraft/runtime": "workspace:*",
     "@types/node": "24.3.1",
-    "wrangler": "4.42.1"
+    "wrangler": "4.45.0"
   }
 }
