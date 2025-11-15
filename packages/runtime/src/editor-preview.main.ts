@@ -3,9 +3,9 @@
 /* eslint-disable no-case-declarations */
 /* eslint-disable no-fallthrough */
 import { isLegacyApi } from '@nordcraft/core/dist/api/api'
+import { isLegacyPluginAction } from '@nordcraft/core/dist/component/actionUtils'
 import {
   HeadTagTypes,
-  type AnimationKeyframe,
   type Component,
   type ComponentData,
   type MetaEntry,
@@ -24,11 +24,13 @@ import {
   type PluginFormula,
   type ToddleFormula,
 } from '@nordcraft/core/dist/formula/formulaTypes'
-import { valueFormula } from '@nordcraft/core/dist/formula/formulaUtils'
-import { getClassName } from '@nordcraft/core/dist/styling/className'
 import { appendUnit } from '@nordcraft/core/dist/styling/customProperty'
 import type { OldTheme, Theme } from '@nordcraft/core/dist/styling/theme'
-import { getThemeCss, renderTheme } from '@nordcraft/core/dist/styling/theme'
+import {
+  getThemeCss,
+  getThemeEntries,
+  renderThemeValues,
+} from '@nordcraft/core/dist/styling/theme'
 import type { StyleVariant } from '@nordcraft/core/dist/styling/variantSelector'
 import type {
   ActionHandler,
@@ -57,7 +59,15 @@ import { dragMove } from './editor/drag-drop/dragMove'
 import { dragReorder } from './editor/drag-drop/dragReorder'
 import { dragStarted } from './editor/drag-drop/dragStarted'
 import { introspectApiRequest } from './editor/graphql'
-import type { DragState } from './editor/types'
+import { isInputTarget } from './editor/input'
+import { updateComponentLinks } from './editor/links'
+import { getRectData } from './editor/overlay'
+import {
+  TextNodeComputedStyles,
+  type DragState,
+  type EditorPostMessageType,
+  type NordcraftPreviewEvent,
+} from './editor/types'
 import { handleAction } from './events/handleAction'
 import type { Signal } from './signal/signal'
 import { signal } from './signal/signal'
@@ -70,149 +80,11 @@ import type {
 } from './types'
 import { createFormulaCache } from './utils/createFormulaCache'
 import { getNodeAndAncestors, isNodeOrAncestorConditional } from './utils/nodes'
-import { omitSubnodeStyleForComponent } from './utils/omitStyle'
 import { rectHasPoint } from './utils/rectHasPoint'
 import {
   getScrollStateRestorer,
   storeScrollState,
 } from './utils/storeScrollState'
-
-type ToddlePreviewEvent =
-  | {
-      type: 'style_variant_changed'
-      variantIndex: number | null
-    }
-  | {
-      type: 'component'
-      component: Component
-    }
-  | { type: 'components'; components: Component[] }
-  | {
-      type: 'packages'
-      packages: Record<
-        string,
-        {
-          components: Record<string, Component>
-          formulas: Record<
-            string,
-            PluginFormula<FormulaHandlerV2> | PluginFormula<string>
-          >
-          actions: Record<string, PluginActionV2 | PluginAction>
-          manifest: {
-            name: string
-            // commit represents the commit hash (version) of the package
-            commit: string
-          }
-        }
-      >
-    }
-  | {
-      type: 'global_formulas'
-      formulas: Record<
-        string,
-        PluginFormula<FormulaHandlerV2> | PluginFormula<string>
-      >
-    }
-  | {
-      type: 'global_actions'
-      actions: Record<string, PluginActionV2 | PluginAction>
-    }
-  | { type: 'theme'; theme: Record<string, OldTheme | Theme> }
-  | { type: 'mode'; mode: 'design' | 'test' }
-  | { type: 'attrs'; attrs: Record<string, unknown> }
-  | { type: 'selection'; selectedNodeId: string | null }
-  | { type: 'highlight'; highlightedNodeId: string | null }
-  | {
-      type: 'click' | 'mousemove' | 'dblclick'
-      metaKey: boolean
-      x: number
-      y: number
-    }
-  | { type: 'report_document_scroll_size' }
-  | { type: 'update_inner_text'; innerText: string }
-  | { type: 'reload' }
-  | { type: 'fetch_api'; apiKey: string }
-  | { type: 'introspect_qraphql_api'; apiKey: string }
-  | { type: 'drag-started'; x: number; y: number }
-  | { type: 'drag-ended'; canceled?: true }
-  | { type: 'keydown'; key: string; altKey: boolean; metaKey: boolean }
-  | { type: 'keyup'; key: string; altKey: boolean; metaKey: boolean }
-  | {
-      type: 'get_computed_style'
-      styles?: string[]
-    }
-  | {
-      type: 'set_timeline_keyframes'
-      keyframes: Record<string, AnimationKeyframe> | null
-    }
-  | {
-      type: 'set_timeline_time'
-      time: number | null
-      timingFunction:
-        | 'linear'
-        | 'ease'
-        | 'ease-in'
-        | 'ease-out'
-        | 'ease-in-out'
-        | 'step-start'
-        | 'step-end'
-        | string
-        | undefined
-      fillMode: 'none' | 'forwards' | 'backwards' | 'both' | undefined
-    }
-  | {
-      type: 'preview_style'
-      styles: Record<string, string> | null
-      theme?: {
-        key: string
-        value: Theme
-      }
-    }
-  | {
-      type: 'preview_theme'
-      theme: string | null
-    }
-
-/**
- * Styles required for rendering the same exact text again somewhere else (on a overlay rect in the editor)
- */
-enum TextNodeComputedStyles {
-  // Caret color is important as it is the only visible part of the text node (when text is not highlighted)
-  CARET_COLOR = 'caret-color',
-  DISPLAY = 'display',
-  FONT_FAMILY = 'font-family',
-  FONT_SIZE = 'font-size',
-  FONT_WEIGHT = 'font-weight',
-  FONT_STYLE = 'font-style',
-  FONT_VARIANT = 'font-variant',
-  FONT_STRETCH = 'font-stretch',
-  LINE_HEIGHT = 'line-height',
-  TEXT_ALIGN = 'text-align',
-  TEXT_TRANSFORM = 'text-transform',
-  LETTER_SPACING = 'letter-spacing',
-  WHITE_SPACE = 'white-space',
-  WORD_SPACING = 'word-spacing',
-  TEXT_INDENT = 'text-indent',
-  TEXT_OVERFLOW = 'text-overflow',
-  TEXT_RENDERING = 'text-rendering',
-  WORD_BREAK = 'word-break',
-  WORD_WRAP = 'word-wrap',
-  DIRECTION = 'direction',
-  UNICODE_BIDI = 'unicode-bidi',
-  VERTICAL_ALIGN = 'vertical-align',
-  FONT_KERNING = 'font-kerning',
-  FONT_FEATURE_SETTINGS = 'font-feature-settings',
-  FONT_VARIATION_SETTINGS = 'font-variation-settings',
-  FONT_SMOOTHING = '-webkit-font-smoothing',
-  ANTI_ALIASING = '-moz-osx-font-smoothing',
-  FONT_OPTICAL_SIZING = 'font-optical-sizing',
-  TAB_SIZE = 'tab-size',
-  HYPHENS = 'hyphens',
-  TEXT_ORIENTATION = 'text-orientation',
-  WRITING_MODE = 'writing-mode',
-  LINE_BREAK = 'line-break',
-  OVERFLOW_WRAP = 'overflow-wrap',
-}
 
 let env: ToddleEnv
 
@@ -312,6 +184,18 @@ export const initGlobalObject = () => {
   )
 }
 
+const EMPTY_COMPONENT_DATA: ComponentData = {
+  Location: {
+    query: {},
+    params: {},
+    page: '/',
+    path: '/',
+    hash: '',
+  },
+  Attributes: {},
+  Variables: {},
+}
+
 // imported by "/.toddle/preview" (see worker/src/preview.ts)
 export const createRoot = (
   domNode: HTMLElement | null = document.getElementById('App'),
@@ -319,35 +203,8 @@ export const createRoot = (
   if (!domNode) {
     throw new Error('Cant find root domNode')
   }
-  const isInputTarget = (event: Event) => {
-    const target = event.target
-    if (target instanceof HTMLElement) {
-      if (
-        target.tagName === 'INPUT' ||
-        target.tagName === 'TEXTAREA' ||
-        target.tagName === 'SELECT' ||
-        target.tagName === 'STYLE-EDITOR'
-      ) {
-        return true
-      }
-      if (target.contentEditable?.toLocaleLowerCase() === 'true') {
-        return true
-      }
-    }
-    return false
-  }
 
-  const dataSignal = signal<ComponentData>({
-    Location: {
-      query: {},
-      params: {},
-      page: '/',
-      path: '/',
-      hash: '',
-    },
-    Attributes: {},
-    Variables: {},
-  })
+  const dataSignal = signal(EMPTY_COMPONENT_DATA)
   let ctxDataSignal: Signal<ComponentData> | undefined
 
   let ctx: ComponentContext | null = null
@@ -387,87 +244,26 @@ export const createRoot = (
   let previewStyleAnimationFrame = -1
   let timelineTimeAnimationFrame = -1
 
-  /**
-   * Modifies all link nodes on a component
-   * NOTE: alters in place
-   */
-  const updateComponentLinks = (component: Component) => {
-    // Find all links and add target="_blank" to them
-    Object.entries(component.nodes ?? {}).forEach(([_, node]) => {
-      if (node.type === 'element' && node.tag === 'a') {
-        node.attrs['target'] = valueFormula('_blank')
-      }
-    })
-    return component
-  }
-
-  const registerActions = (
-    allActions: Record<string, PluginActionV2 | PluginAction>,
-    packageName?: string,
-  ) => {
-    const actions: Record<string, PluginActionV2> = {}
-    Object.entries(allActions ?? {}).forEach(([name, action]) => {
-      if (typeof action.name === 'string' && action.version === undefined) {
-        // Legacy actions are self-registering. We need to execute them to register them
-        Function(action.handler)()
-        return
-      }
-      // We need to convert the handler string into a real function
-      actions[name] = {
-        ...(action as PluginActionV2),
-        handler:
-          typeof action.handler === 'string'
-            ? (new Function(
-                'args, ctx',
-                `${action.handler}
-          return ${safeFunctionName(action.name)}(args, ctx)`,
-              ) as ActionHandlerV2)
-            : action.handler,
-      }
-    })
-    window.toddle.actions[packageName ?? window.__toddle.project] = actions
-  }
-
-  const registerFormulas = (
-    allFormulas: Record<
-      string,
-      ToddleFormula | CodeFormula<FormulaHandlerV2> | CodeFormula<string>
-    >,
-    packageName?: string,
-  ) => {
-    const formulas: Record<string, PluginFormula<FormulaHandlerV2>> = {}
-    Object.entries(allFormulas ?? {}).forEach(([name, formula]) => {
-      if (
-        !isToddleFormula<FormulaHandlerV2 | string>(formula) &&
-        typeof formula.name === 'string' &&
-        formula.version === undefined
-      ) {
-        // Legacy formulas are self-registering. We need to execute them to register them
-        Function(formula.handler as unknown as string)()
-        return
-      } else if (!isToddleFormula<FormulaHandlerV2 | string>(formula)) {
-        // For code formulas we need to convert the handler string into a real function
-        formulas[name] = {
-          ...formula,
-          handler:
-            typeof formula.handler === 'string'
-              ? (new Function(
-                  'args, ctx',
-                  `${formula.handler}
-                return ${safeFunctionName(formula.name)}(args, ctx)`,
-                ) as FormulaHandlerV2)
-              : formula.handler,
+  const setupDataSignalSubscribers = () => {
+    dataSignal.subscribe((data) => {
+      if (component && components && packageComponents && data) {
+        try {
+          postMessageToEditor({ type: 'data', data })
+        } catch {
+          // If we're unable to send the data, let's try to JSON serialize it
+          postMessageToEditor({
+            type: 'data',
+            data: JSON.parse(JSON.stringify(data)),
+          })
         }
-        return
       }
-      formulas[name] = formula as PluginFormula<FormulaHandlerV2>
     })
-    window.toddle.formulas[packageName ?? window.__toddle.project] = formulas
   }
+  setupDataSignalSubscribers()
 
   window.addEventListener(
     'message',
-    async (message: MessageEvent<ToddlePreviewEvent>) => {
+    async (message: MessageEvent<NordcraftPreviewEvent>) => {
       if (!message.isTrusted) {
         console.error('UNTRUSTED MESSAGE')
       }
@@ -481,11 +277,22 @@ export const createRoot = (
             | undefined
 
           if (message.data.component.name !== component?.name) {
+            // Store scroll state for the previous component
             storeScrollState(component?.name)
+            // Remove all subscribers from the previous showSignal
             showSignal.cleanSubscribers()
+            // Clear any previously overridden conditional elements
+            showSignal.set({ displayedNodes: [], testMode: mode === 'test' })
+            // Restore scroll state for the new component
             scrollStateRestorer = getScrollStateRestorer(
               message.data.component.name,
             )
+            // Destroy the dataSignal (including subscribers) for the previous component
+            dataSignal.destroy()
+            // Re-subscribe all dataSignal subscribers
+            setupDataSignalSubscribers()
+            // Re-initialize the data signal for the new component
+            ctxDataSignal?.destroy()
           }
 
           component = updateComponentLinks(message.data.component)
@@ -550,7 +357,7 @@ export const createRoot = (
               ctx.components = allComponents
             }
 
-            updateStyle()
+            updateStyle(component)
             update()
           }
 
@@ -582,7 +389,7 @@ export const createRoot = (
               ctx.components = allComponents
             }
 
-            updateStyle()
+            updateStyle(component)
             update()
           }
 
@@ -1147,33 +954,47 @@ export const createRoot = (
                   .filter(([key]) => previewStyleStyles[key])
                   .map(([key, val]) => [
                     key,
-                    { ...val, value: previewStyleStyles[key] },
+                    {
+                      ...val,
+                      values: {
+                        ...val.values,
+                        [theme.key]: previewStyleStyles[key],
+                      },
+                    },
                   ]),
               )
               const cssBlocks: string[] = []
-              if (theme.value.default) {
-                cssBlocks.push(renderTheme(`:host, :root`, theme.value))
-              }
-              if (theme.value.defaultDark) {
+              if (theme.key === theme.value.default) {
                 cssBlocks.push(
-                  renderTheme(
+                  renderThemeValues(
                     `:host, :root`,
-                    theme.value,
+                    getThemeEntries(theme.value, theme.key),
+                  ),
+                )
+              }
+              if (theme.key === theme.value.defaultDark) {
+                cssBlocks.push(
+                  renderThemeValues(
+                    `:host, :root`,
+                    getThemeEntries(theme.value, theme.key),
                     '@media (prefers-color-scheme: dark)',
                   ),
                 )
               }
-              if (theme.value.defaultLight) {
+              if (theme.key === theme.value.defaultLight) {
                 cssBlocks.push(
-                  renderTheme(
+                  renderThemeValues(
                     `:host, :root`,
-                    theme.value,
+                    getThemeEntries(theme.value, theme.key),
                     '@media (prefers-color-scheme: light)',
                   ),
                 )
               }
               cssBlocks.push(
-                renderTheme(`[data-theme~="${theme.key}"]`, theme.value),
+                renderThemeValues(
+                  `[data-theme~="${theme.key}"]`,
+                  getThemeEntries(theme.value, theme.key),
+                ),
               )
               styleTag.innerHTML = cssBlocks.join('\n')
             } else {
@@ -1203,7 +1024,7 @@ export const createRoot = (
     storeScrollState(component?.name)
   })
 
-  const updateStyle = () => {
+  const updateStyle = (component: Component | null) => {
     if (component) {
       insertStyles(document.head, component, getAllComponents())
     }
@@ -1572,82 +1393,56 @@ export const createRoot = (
     }
 
     if (
-      fastDeepEqual(newCtx.component.nodes, ctx?.component?.nodes) === false
+      fastDeepEqual(newCtx.component.nodes, ctx?.component?.nodes) === false ||
+      fastDeepEqual(newCtx.component.formulas, ctx?.component?.formulas) ===
+        false
     ) {
-      updateStyle()
+      updateStyle(newCtx.component)
 
       // Remove preview styles automatically when the component changes
       document.head.querySelector('[data-id="selected-node-styles"]')?.remove()
-      if (
-        fastDeepEqual(
-          omitSubnodeStyleForComponent(newCtx.component),
-          omitSubnodeStyleForComponent(ctx?.component),
-        )
-      ) {
-        // If we're in here, then the latest update was only a style change, so we should try some optimistic updates
-        Object.keys(newCtx.component.nodes).forEach((nodeId) => {
-          const newNode = newCtx.component.nodes[nodeId]
-          const oldNode = ctx?.component.nodes[nodeId]
-          if (
-            (newNode.type === 'element' || newNode.type === 'component') &&
-            (oldNode?.type === 'element' || oldNode?.type === 'component') &&
-            (!fastDeepEqual(newNode.style, oldNode.style) ||
-              !fastDeepEqual(newNode.variants, oldNode.variants))
-          ) {
-            document
-              .querySelectorAll(`[data-node-id="${nodeId}"]`)
-              .forEach((nodeInstance) => {
-                nodeInstance.classList.remove(
-                  getClassName([oldNode.style, oldNode.variants]),
-                )
-                nodeInstance.classList.add(
-                  getClassName([newNode.style, newNode.variants]),
-                )
-              })
-          }
-        })
-      } else {
-        Array.from(domNode.children).forEach((child) => {
-          if (child.tagName !== 'SCRIPT') {
-            child.remove()
-          }
-        })
 
-        // Clear old root signal and create a new one to not keep old signals with previous root around
-        ctxDataSignal?.destroy()
-        ctxDataSignal = dataSignal.map((data) => data)
-        try {
-          const rootElem = createNode({
-            id: 'root',
-            path: '0',
-            dataSignal: ctxDataSignal,
-            ctx: newCtx,
-            parentElement: domNode,
-            instance: { [newCtx.component.name]: 'root' },
-          })
-          newCtx.component.onLoad?.actions.forEach((action) => {
-            // eslint-disable-next-line @typescript-eslint/no-floating-promises
-            handleAction(action, dataSignal.get(), newCtx)
-          })
-          rootElem.forEach((elem) => domNode.appendChild(elem))
-        } catch (error: unknown) {
-          const isPage = isPageComponent(newCtx.component)
-          let name = `Unexpected error while rendering ${isPage ? 'page' : 'component'}`
-          let message = error instanceof Error ? error.message : String(error)
-          let panic = false
-          if (error instanceof RangeError) {
-            // RangeError is unrecoverable
-            panic = true
-            name = 'Infinite loop detected'
-            message =
-              'RangeError (Maximum call stack size exceeded): Remove any circular dependencies or recursive calls (Try undoing your last change). This is most likely caused by a component, formula or action using itself.'
-          }
+      Array.from(domNode.children).forEach((child) => {
+        if (child.tagName !== 'SCRIPT') {
+          child.remove()
+        }
+      })
 
-          // This can be triggered by setting "type" on a select etc.
-          if (error instanceof TypeError) {
-            panic = true
-            name = 'TypeError'
-            message = `Type errors are often caused by:
+      // Clear old root signal and create a new one to not keep old signals with previous root around
+      ctxDataSignal?.destroy()
+      ctxDataSignal = dataSignal.map((data) => data)
+      try {
+        const rootElem = createNode({
+          id: 'root',
+          path: '0',
+          dataSignal: ctxDataSignal,
+          ctx: newCtx,
+          parentElement: domNode,
+          instance: { [newCtx.component.name]: 'root' },
+        })
+        newCtx.component.onLoad?.actions.forEach((action) => {
+          // eslint-disable-next-line @typescript-eslint/no-floating-promises
+          handleAction(action, dataSignal.get(), newCtx)
+        })
+        rootElem.forEach((elem) => domNode.appendChild(elem))
+      } catch (error: unknown) {
+        const isPage = isPageComponent(newCtx.component)
+        let name = `Unexpected error while rendering ${isPage ? 'page' : 'component'}`
+        let message = error instanceof Error ? error.message : String(error)
+        let panic = false
+        if (error instanceof RangeError) {
+          // RangeError is unrecoverable
+          panic = true
+          name = 'Infinite loop detected'
+          message =
+            'RangeError (Maximum call stack size exceeded): Remove any circular dependencies or recursive calls (Try undoing your last change). This is most likely caused by a component, formula or action using itself.'
+        }
+
+        // This can be triggered by setting "type" on a select etc.
+        if (error instanceof TypeError) {
+          panic = true
+          name = 'TypeError'
+          message = `Type errors are often caused by:
 
 • Trying to set a read-only property (like "type" on a select element).
 
@@ -1656,36 +1451,35 @@ export const createRoot = (
 • Trying to access a property on an undefined or null value.
 
 • Trying to call a method on an undefined or null value.`
-          }
-
-          console.error(name, message, error)
-
-          if (panic) {
-            // Show error overlay in the editor until next update
-            const panicScreen = createPanicScreen({
-              name: name,
-              message,
-              isPage,
-              cause: error,
-            })
-
-            // Replace the inner HTML of the editor preview with the panic screen
-            domNode.innerHTML = ''
-            domNode.appendChild(panicScreen)
-          } else {
-            // Otherwise send a toast to the editor with the error (unknown errors may be recoverable), if not please add the error-type to the above
-            sendEditorToast(name, message, {
-              type: 'critical',
-            })
-          }
         }
-        postMessageToEditor({
-          type: 'style',
-          time: new Intl.DateTimeFormat('en-GB', {
-            timeStyle: 'long',
-          }).format(new Date()),
-        })
+
+        console.error(name, message, error)
+
+        if (panic) {
+          // Show error overlay in the editor until next update
+          const panicScreen = createPanicScreen({
+            name: name,
+            message,
+            isPage,
+            cause: error,
+          })
+
+          // Replace the inner HTML of the editor preview with the panic screen
+          domNode.innerHTML = ''
+          domNode.appendChild(panicScreen)
+        } else {
+          // Otherwise send a toast to the editor with the error (unknown errors may be recoverable), if not please add the error-type to the above
+          sendEditorToast(name, message, {
+            type: 'critical',
+          })
+        }
       }
+      postMessageToEditor({
+        type: 'style',
+        time: new Intl.DateTimeFormat('en-GB', {
+          timeStyle: 'long',
+        }).format(new Date()),
+      })
     }
 
     ctx = newCtx
@@ -1758,68 +1552,7 @@ export const createRoot = (
     return ctx
   }
 
-  document.addEventListener('keydown', (event) => {
-    if (isInputTarget(event)) {
-      return
-    }
-    switch (event.key) {
-      case 'k':
-        if (event.metaKey) {
-          event.preventDefault()
-        }
-    }
-    postMessageToEditor({
-      type: 'keydown',
-      event: {
-        key: event.key,
-        metaKey: event.metaKey,
-        shiftKey: event.shiftKey,
-        altKey: event.altKey,
-      },
-    })
-  })
-  document.addEventListener('keyup', (event) => {
-    if (isInputTarget(event)) {
-      return
-    }
-    postMessageToEditor({
-      type: 'keyup',
-      event: {
-        key: event.key,
-        metaKey: event.metaKey,
-        shiftKey: event.shiftKey,
-        altKey: event.altKey,
-      },
-    })
-  })
-  document.addEventListener('keypress', (event) => {
-    if (isInputTarget(event)) {
-      return
-    }
-    postMessageToEditor({
-      type: 'keypress',
-      event: {
-        key: event.key,
-        metaKey: event.metaKey,
-        shiftKey: event.shiftKey,
-        altKey: event.altKey,
-      },
-    })
-  })
-
-  dataSignal.subscribe((data) => {
-    if (component && components && packageComponents && data) {
-      try {
-        postMessageToEditor({ type: 'data', data })
-      } catch {
-        // If we're unable to send the data, let's try to JSON serialize it
-        postMessageToEditor({
-          type: 'data',
-          data: JSON.parse(JSON.stringify(data)),
-        })
-      }
-    }
-  })
+  initKeyListeners()
 
   const clearSelectedStyleVariant = () => {
     if (styleVariantSelection) {
@@ -1878,28 +1611,6 @@ export const createRoot = (
 
     requestAnimationFrame(() => syncOverlayRects(selectionRect, highlightRect))
   })()
-}
-
-function getRectData(selectedNode: Element | null | undefined) {
-  if (!selectedNode) {
-    return null
-  }
-
-  const { borderRadius, rotate } = window.getComputedStyle(selectedNode)
-  const rect: DOMRect = selectedNode.getBoundingClientRect()
-
-  return {
-    left: rect.left,
-    right: rect.right,
-    top: rect.top,
-    bottom: rect.bottom,
-    width: rect.width,
-    height: rect.height,
-    x: rect.x,
-    y: rect.y,
-    borderRadius: borderRadius.split(' '),
-    rotate,
-  }
 }
 
 const insertOrReplaceHeadNode = (id: string, node: Node) => {
@@ -2004,90 +1715,121 @@ const insertTheme = (
   parent.appendChild(styleElem)
 }
 
-type PostMessageType =
-  | {
-      type: 'textComputedStyle'
-      computedStyle: Record<string, string>
+const initKeyListeners = () => {
+  document.addEventListener('keydown', (event) => {
+    if (isInputTarget(event)) {
+      return
     }
-  | {
-      type: 'selection'
-      selectedNodeId: string | null
+    switch (event.key) {
+      case 'k':
+        if (event.metaKey) {
+          event.preventDefault()
+        }
     }
-  | {
-      type: 'highlight'
-      highlightedNodeId: string | null
-    }
-  | {
-      type: 'navigate'
-      name: string
-    }
-  | {
-      type: 'documentScrollSize'
-      scrollHeight: number
-      scrollWidth: number
-    }
-  | {
-      type: 'nodeMoved'
-      copy: boolean
-      parent?: string | null
-      index?: number
-    }
-  | {
-      type: 'computedStyle'
-      computedStyle: Record<string, string>
-    }
-  | {
-      type: 'style'
-      time: string
-    }
-  | {
-      type: 'component event'
-      event: any
-      time: string
-      data: any
-    }
-  | {
-      type: 'keydown'
+    postMessageToEditor({
+      type: 'keydown',
       event: {
-        key: string
-        metaKey: boolean
-        shiftKey: boolean
-        altKey: boolean
-      }
+        key: event.key,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+      },
+    })
+  })
+  document.addEventListener('keyup', (event) => {
+    if (isInputTarget(event)) {
+      return
     }
-  | {
-      type: 'keyup'
+    postMessageToEditor({
+      type: 'keyup',
       event: {
-        key: string
-        metaKey: boolean
-        shiftKey: boolean
-        altKey: boolean
-      }
+        key: event.key,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+      },
+    })
+  })
+  document.addEventListener('keypress', (event) => {
+    if (isInputTarget(event)) {
+      return
     }
-  | {
-      type: 'keypress'
+    postMessageToEditor({
+      type: 'keypress',
       event: {
-        key: string
-        metaKey: boolean
-        shiftKey: boolean
-        altKey: boolean
-      }
-    }
-  | { type: 'data'; data: ComponentData }
-  | {
-      type: 'selectionRect'
-      rect: ReturnType<typeof getRectData>
-    }
-  | {
-      type: 'highlightRect'
-      rect: ReturnType<typeof getRectData>
-    }
-  | {
-      type: 'introspectionResult'
-      data: any
-      apiKey: string
-    }
+        key: event.key,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+      },
+    })
+  })
+}
 
-const postMessageToEditor = (message: PostMessageType) => {
+const registerActions = (
+  allActions: Record<string, PluginAction>,
+  packageName?: string,
+) => {
+  const actions: Record<string, PluginActionV2> = {}
+  Object.entries(allActions ?? {}).forEach(([name, action]) => {
+    if (isLegacyPluginAction(action)) {
+      // Legacy actions are self-registering. We need to execute them to register them
+      Function(action.handler)()
+      return
+    }
+    // We need to convert the handler string into a real function
+    actions[name] = {
+      ...(action as PluginActionV2),
+      handler:
+        typeof action.handler === 'string'
+          ? (new Function(
+              'args, ctx',
+              `${action.handler}
+          return ${safeFunctionName(action.name)}(args, ctx)`,
+            ) as ActionHandlerV2)
+          : action.handler,
+    }
+  })
+  window.toddle.actions[packageName ?? window.__toddle.project] = actions
+}
+
+const registerFormulas = (
+  allFormulas: Record<
+    string,
+    ToddleFormula | CodeFormula<FormulaHandlerV2> | CodeFormula<string>
+  >,
+  packageName?: string,
+) => {
+  const formulas: Record<string, PluginFormula<FormulaHandlerV2>> = {}
+  Object.entries(allFormulas ?? {}).forEach(([name, formula]) => {
+    if (
+      !isToddleFormula<FormulaHandlerV2 | string>(formula) &&
+      typeof formula.name === 'string' &&
+      formula.version === undefined
+    ) {
+      // Legacy formulas are self-registering. We need to execute them to register them
+      Function(formula.handler as unknown as string)()
+      return
+    } else if (!isToddleFormula<FormulaHandlerV2 | string>(formula)) {
+      // For code formulas we need to convert the handler string into a real function
+      formulas[name] = {
+        ...formula,
+        handler:
+          typeof formula.handler === 'string'
+            ? (new Function(
+                'args, ctx',
+                `${formula.handler}
+                return ${safeFunctionName(formula.name)}(args, ctx)`,
+              ) as FormulaHandlerV2)
+            : formula.handler,
+      }
+      return
+    }
+    formulas[name] = formula as PluginFormula<FormulaHandlerV2>
+  })
+  window.toddle.formulas[packageName ?? window.__toddle.project] = formulas
+}
+
+const postMessageToEditor = (message: EditorPostMessageType) => {
   window.parent?.postMessage(message, '*')
 }
